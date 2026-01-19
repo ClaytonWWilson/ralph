@@ -1,0 +1,10 @@
+#!/bin/bash
+# Ralph wrapper script
+# This ensures the Python script runs with the correct working directory
+
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Run the Python script, passing through all arguments
+# The Python script will inherit the current working directory
+python "$SCRIPT_DIR/ralph.py" "$@"
