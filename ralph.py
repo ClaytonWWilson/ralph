@@ -536,6 +536,70 @@ def get_prd_stats() -> tuple[int, int, int]:
         return (0, 0, 0)
 
 
+def get_category_breakdown() -> dict[str, tuple[int, int]]:
+    """
+    Read prd.json and group tasks by category.
+    Returns dict mapping category -> (passing, total).
+    """
+    prd_path = os.path.join(os.getcwd(), "prd.json")
+    if not os.path.exists(prd_path):
+        return {}
+
+    try:
+        with open(prd_path, "r") as f:
+            prd = json.load(f)
+
+        categories: dict[str, tuple[int, int]] = {}
+
+        features = prd.get("tasks", prd.get("features", prd.get("items", [])))
+        if isinstance(features, list):
+            for feature in features:
+                if isinstance(feature, dict):
+                    category = feature.get("category", "uncategorized")
+                    status = feature.get(
+                        "passes", feature.get("passing", feature.get("status", feature.get("done", False)))
+                    )
+                    is_passing = (
+                        status is True
+                        or status == "passing"
+                        or status == "done"
+                        or status == "complete"
+                    )
+
+                    if category not in categories:
+                        categories[category] = (0, 0)
+
+                    passing, total = categories[category]
+                    categories[category] = (passing + (1 if is_passing else 0), total + 1)
+
+        return categories
+    except (json.JSONDecodeError, IOError):
+        return {}
+
+
+def get_commits_since(timestamp: float) -> int:
+    """
+    Count git commits made since the given Unix timestamp.
+    Returns 0 if not in a git repo or on error.
+    """
+    try:
+        # Convert timestamp to ISO format for git
+        from datetime import datetime as dt
+        since_str = dt.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+
+        result = subprocess.run(
+            ["git", "rev-list", "--count", f"--since={since_str}", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return int(result.stdout.strip())
+        return 0
+    except (subprocess.TimeoutExpired, ValueError, FileNotFoundError):
+        return 0
+
+
 def format_duration(seconds: float) -> str:
     """Format a duration in seconds to a human-readable string."""
     if seconds < 60:
@@ -555,6 +619,8 @@ def print_status_bar(
     total_iterations: int,
     prev_iteration_time: Optional[float],
     session_start_time: float,
+    stop_reasons: dict[str, int],
+    completed_iterations: int,
 ) -> None:
     """Print a status bar at the start of each iteration."""
     now = datetime.now()
@@ -563,6 +629,8 @@ def print_status_bar(
 
     # Get prd.json stats
     passing, not_passing, total = get_prd_stats()
+    categories = get_category_breakdown()
+    commits = get_commits_since(session_start_time)
 
     # Build status bar
     print(f"\n{'=' * 80}")
@@ -586,7 +654,34 @@ def print_status_bar(
             f"  📊 PRD Progress: [{bar}] {passing}/{total} passing ({progress_pct:.0f}%)"
         )
     else:
-        print(f"  📊 PRD Progress: No prd.json found")
+        print("  📊 PRD Progress: No prd.json found")
+
+    # Row 3: Category breakdown (if categories exist)
+    if categories:
+        cat_parts = []
+        for cat, (cat_pass, cat_total) in sorted(categories.items()):
+            marker = "✓" if cat_pass == cat_total else ""
+            cat_parts.append(f"{cat}: {cat_pass}/{cat_total}{marker}")
+        print(f"  📁 Categories: {' | '.join(cat_parts)}")
+
+    # Row 4: Session stats (commits, completion rate)
+    completion_rate = 0
+    if completed_iterations > 0:
+        completion_rate = (stop_reasons.get("complete", 0) / completed_iterations) * 100
+    session_info = f"  📈 Session: {completed_iterations} iterations"
+    session_info += f" │ Commits: {commits}"
+    session_info += f" │ Rate: {completion_rate:.0f}% complete"
+    print(session_info)
+
+    # Row 5: Stop reasons tally (only show if we have completed iterations)
+    if completed_iterations > 0:
+        stop_parts = []
+        for reason in ["complete", "in_progress", "timeout", "repetition", "error", "normal"]:
+            count = stop_reasons.get(reason, 0)
+            if count > 0:
+                stop_parts.append(f"{count} {reason}")
+        if stop_parts:
+            print(f"  🏁 Stops: {', '.join(stop_parts)}")
 
     print(f"{'=' * 80}\n")
 
@@ -631,40 +726,72 @@ def main():
         history_size=args.history_size, threshold=args.repetition_threshold
     )
 
+    # Track session stats
+    session_start_time = time.time()
+    prev_iteration_time: Optional[float] = None
+    completed_iterations = 0
+    stop_reasons: dict[str, int] = {
+        "complete": 0,
+        "in_progress": 0,
+        "timeout": 0,
+        "repetition": 0,
+        "error": 0,
+        "normal": 0,
+    }
+
     # Run iterations
     for iteration in range(1, args.iterations + 1):
-        if args.iterations > 1:
-            print(f"\n{'=' * 60}")
-            print(f"Iteration {iteration}/{args.iterations}")
-            print(f"{'=' * 60}\n")
+        # Print status bar at start of each iteration
+        print_status_bar(
+            iteration=iteration,
+            total_iterations=args.iterations,
+            prev_iteration_time=prev_iteration_time,
+            session_start_time=session_start_time,
+            stop_reasons=stop_reasons,
+            completed_iterations=completed_iterations,
+        )
+
+        iteration_start_time = time.time()
 
         result = run_iteration(
             runner=args.runner, prompt=prompt, timeout=args.timeout, detector=detector
         )
 
-        # Handle early stops
+        # Track iteration time
+        prev_iteration_time = time.time() - iteration_start_time
+        completed_iterations += 1
+
+        # Handle early stops and track stop reasons
         if result.stopped_early:
             if result.reason == "repetition":
+                stop_reasons["repetition"] += 1
                 print("\n[Ralph] Repetition detected, moving to next iteration\n")
             elif result.reason and result.reason.startswith("promise:"):
                 promise_type = result.reason.split(":", 1)[1]
                 if promise_type == "complete":
+                    stop_reasons["complete"] += 1
                     print(
                         "\n[Ralph] Feature completion detected (<promise>COMPLETE</promise>), moving to next iteration\n"
                     )
                 elif promise_type == "in_progress":
+                    stop_reasons["in_progress"] += 1
                     print(
                         "\n[Ralph] Work in progress detected (<promise>IN PROGRESS</promise>), moving to next iteration\n"
                     )
                 else:
+                    stop_reasons["normal"] += 1
                     print(
                         "\n[Ralph] Promise marker detected, moving to next iteration\n"
                     )
             elif result.reason == "timeout":
+                stop_reasons["timeout"] += 1
                 print("\n[Ralph] Timeout reached, moving to next iteration\n")
             elif result.reason == "error":
+                stop_reasons["error"] += 1
                 print("\n[Ralph] Error occurred, stopping execution\n")
                 sys.exit(1)
+        else:
+            stop_reasons["normal"] += 1
 
         # Reset detector for next iteration
         detector.reset()
