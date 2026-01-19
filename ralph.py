@@ -102,7 +102,7 @@ This should be the one YOU decide has the highest priority - not necessarily the
 2. Append to progress.txt consistently with your progress updates and findings while implementing the feature. \
 Use this to leave a note for the next person working in the codebase. \
 3. Update the prd.json with the work that was done. \
-4. Make a git commit of that feature using `git commit --all`. \
+4. Make a git commit of that feature using `git add --all` and `git commit -m <message>`. \
 ONLY WORK ON A SINGLE FEATURE. \
 If you are unable to complete a feature or get stuck on a failing test, save your findings in progress.txt and output <promise>IN PROGRESS</promise>. \
 5. After implementing the feature, output <promise>COMPLETE</promise> to signal it is complete. \
