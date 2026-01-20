@@ -97,8 +97,8 @@ ASCII_HEADER = """--------------------------------------------------------------
 RUNNER_TEMPLATES = {
     "crush": ["crush", "run", "-d", "{prompt}"],
     "nanocoder": ["nanocoder", "run", "{prompt}"],
-    "opencode": ["opencode", "run", "--directive", "{prompt}"],
-    "claude-code": ["claude", "code", "-d", "{prompt}"],
+    "opencode": ["opencode", "run", "{prompt}"],
+    "claude-code": ["claude", "-p", "{prompt}"],
 }
 
 
@@ -206,7 +206,7 @@ class RepetitionDetector:
         self.sentence_counts.clear()
 
 
-def check_for_promise(line: str) -> tuple[bool, str]:
+def check_for_promise(line: str) -> tuple[bool, str | None]:
     """
     Check if line contains a promise marker.
     Returns (found, type) where type is 'complete', 'in_progress', or None.
@@ -312,6 +312,7 @@ def run_iteration(
         def read_output_worker():
             """Background thread that reads and processes subprocess output."""
             import select
+
             current_line = ""
 
             try:
