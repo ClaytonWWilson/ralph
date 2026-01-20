@@ -205,11 +205,11 @@ def check_for_promise(line: str) -> tuple[bool, str]:
     Returns (found, type) where type is 'complete', 'in_progress', or None.
     """
     # Check for completion marker
-    if "<promise>COMPLETE</promise>" in line.strip():
+    if "<promise>COMPLETE</promise>" == line.strip():
         return (True, "complete")
 
     # Check for in-progress marker
-    if "<promise>IN PROGRESS</promise>" in line.strip():
+    if "<promise>IN PROGRESS</promise>" == line.strip():
         return (True, "in_progress")
 
     # Check for common patterns where AI mentions outputting the promise
