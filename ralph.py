@@ -15,7 +15,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional, Deque
+from typing import Optional, Deque, Union
 import os
 from time import sleep
 
@@ -120,7 +120,8 @@ ONLY WORK ON A SINGLE FEATURE. \
 If you are unable to complete a feature or get stuck on a failing test, save your findings in progress.txt and output <promise>IN PROGRESS</promise>. \
 5. After implementing the feature, output <promise>COMPLETE</promise> to signal it is complete. \
 If, while implementing the feature, you notice that it's already complete, output <promise>COMPLETE</promise>. \
-Only mark a single feature as passing, then output <promise>COMPLETE</promise>."
+ONLY MARK A SINGLE TASK AS PASSING, EVEN IF MULTIPLE ARE ALREADY PASSING, then output <promise>COMPLETE</promise>. \
+If every feature in prd.json is passing, then output <promise>ALL TASKS COMPLETE</promise>."
 
 
 @dataclass
@@ -215,32 +216,26 @@ class RepetitionDetector:
 def check_for_promise(line: str) -> tuple[bool, str | None]:
     """
     Check if line contains a promise marker.
-    Returns (found, type) where type is 'complete', 'in_progress', or None.
+    Returns (found, type) where type is 'complete', 'in_progress', 'all_complete', or None.
     """
+    stripped = line.strip()
+
+    # Debug: Print what we're checking (will help diagnose issues)
+    # Uncomment for debugging:
+    if "promise" in stripped.lower():
+        print(f"\n[DEBUG] Checking line: {repr(stripped)}", file=sys.stderr)
+
+    # Check for all tasks complete marker (check longest match first)
+    if stripped == "<promise>ALL TASKS COMPLETE</promise>":
+        return (True, "all_complete")
+
     # Check for completion marker
-    if "<promise>COMPLETE</promise>" == line.strip():
+    if stripped == "<promise>COMPLETE</promise>":
         return (True, "complete")
 
     # Check for in-progress marker
-    if "<promise>IN PROGRESS</promise>" == line.strip():
+    if stripped == "<promise>IN PROGRESS</promise>":
         return (True, "in_progress")
-
-    # Check for common patterns where AI mentions outputting the promise
-    # (case-insensitive matching)
-    # line_lower = line.lower()
-    # promise_mention_patterns = [
-    #     "output <promise>complete</promise>",
-    #     "outputting <promise>complete</promise>",
-    #     "will now output <promise>complete</promise>",
-    #     "i will now output <promise>complete</promise>",
-    #     "now output <promise>complete</promise>",
-    #     "to indicate that the feature is complete",
-    #     "indicate completion",
-    # ]
-
-    # for pattern in promise_mention_patterns:
-    #     if pattern in line_lower:
-    #         return True
 
     return (False, None)
 
@@ -312,7 +307,7 @@ def run_iteration(
         start_time = time.time()
 
         # Shared state for the output reading thread
-        stop_reason = [None]  # Use list for mutable reference
+        stop_reason: list[Union[str, None]] = [None]  # Use list for mutable reference
         thread_done = threading.Event()
 
         def read_output_worker():
@@ -825,6 +820,7 @@ def main():
     stop_reasons: dict[str, int] = {
         "complete": 0,
         "in_progress": 0,
+        "all_complete": 0,
         "timeout": 0,
         "repetition": 0,
         "error": 0,
@@ -865,7 +861,16 @@ def main():
                 print("\n[Ralph] Repetition detected, moving to next iteration\n")
             elif result.reason and result.reason.startswith("promise:"):
                 promise_type = result.reason.split(":", 1)[1]
-                if promise_type == "complete":
+                if promise_type == "all_complete":
+                    stop_reasons["all_complete"] += 1
+                    print(
+                        "\n[Ralph] All tasks complete detected (<promise>ALL TASKS COMPLETE</promise>)\n"
+                    )
+                    print(f"\n{'=' * 60}")
+                    print("All tasks completed! Stopping execution.")
+                    print(f"{'=' * 60}\n")
+                    sys.exit(0)
+                elif promise_type == "complete":
                     stop_reasons["complete"] += 1
                     print(
                         "\n[Ralph] Feature completion detected (<promise>COMPLETE</promise>), moving to next iteration\n"
