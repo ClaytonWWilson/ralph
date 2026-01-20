@@ -7,8 +7,10 @@ Runs AI agents (crush, opencode, claude-code) with iteration control, timeouts, 
 import argparse
 import json
 import re
+import signal
 import subprocess
 import sys
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -16,6 +18,11 @@ from datetime import datetime
 from typing import Optional, Deque
 import os
 from time import sleep
+
+# Global state for signal handling
+exit_requested = False
+current_process = None
+sigint_count = 0
 
 ASCII_HEADER = """----------------------------------------------------------------------------------------------------=
 --------------------------------------------------==------------------------------------------------=
@@ -270,147 +277,162 @@ def run_iteration(
     cmd = " ".join(cmd_parts)
 
     try:
-        # Start subprocess
-        # Use shell=True on Windows to properly resolve commands like 'crush' that have .cmd wrappers
-        # We explicitly cd to the working directory in the shell command itself
-        # Use line buffering (bufsize=1) which is more reliable than unbuffered on Windows
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,  # Line buffered - more reliable on Windows
-            shell=True,
-        )
-
-        start_time = time.time()
-        current_line = ""
-
-        # Use select/poll on Unix-like systems, or just iterate on Windows
-        # Read output in real-time
-        import select
         import platform
 
-        while True:
-            # Check for timeout first
+        # Prepare subprocess arguments to prevent CTRL+C propagation
+        popen_kwargs = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.STDOUT,
+            "text": True,
+            "bufsize": 1,  # Line buffered - more reliable on Windows
+            "shell": True,
+        }
+
+        # Platform-specific handling to isolate subprocess from parent's signals
+        if platform.system() == "Windows":
+            # CREATE_NEW_PROCESS_GROUP prevents child from receiving parent's CTRL+C
+            popen_kwargs["creationflags"] = 0x00000200  # CREATE_NEW_PROCESS_GROUP
+        else:
+            # On Unix, start a new session so subprocess doesn't receive parent's signals
+            popen_kwargs["start_new_session"] = True
+
+        # Start subprocess
+        process = subprocess.Popen(cmd, **popen_kwargs)
+
+        # Set global reference for signal handler
+        global current_process
+        current_process = process
+
+        start_time = time.time()
+
+        # Shared state for the output reading thread
+        stop_reason = [None]  # Use list for mutable reference
+        thread_done = threading.Event()
+
+        def read_output_worker():
+            """Background thread that reads and processes subprocess output."""
+            import select
+            current_line = ""
+
+            try:
+                while True:
+                    # Check if process is still running
+                    if process.poll() is not None:
+                        # Process has ended, read any remaining output
+                        remaining = process.stdout.read()
+                        if remaining:
+                            sys.stdout.write(remaining)
+                            sys.stdout.flush()
+                            for line in remaining.splitlines(keepends=True):
+                                if line.endswith("\n"):
+                                    detector.add_line(line)
+                        break
+
+                    # Read output character by character
+                    if platform.system() == "Windows":
+                        try:
+                            char = process.stdout.read(1)
+                            if not char:
+                                continue
+
+                            sys.stdout.write(char)
+                            sys.stdout.flush()
+                            current_line += char
+
+                            if char == "\n":
+                                # Check for promise marker
+                                found, promise_type = check_for_promise(current_line)
+                                if found:
+                                    stop_reason[0] = f"promise:{promise_type}"
+                                    process.terminate()
+                                    break
+
+                                # Check for repetition
+                                if detector.add_line(current_line):
+                                    stop_reason[0] = "repetition"
+                                    process.terminate()
+                                    break
+
+                                current_line = ""
+                        except Exception:
+                            if process.poll() is not None:
+                                break
+                    else:
+                        # Unix systems
+                        ready, _, _ = select.select([process.stdout], [], [], 0.1)
+                        if ready:
+                            char = process.stdout.read(1)
+                            if not char:
+                                break
+
+                            sys.stdout.write(char)
+                            sys.stdout.flush()
+                            current_line += char
+
+                            if char == "\n":
+                                found, promise_type = check_for_promise(current_line)
+                                if found:
+                                    stop_reason[0] = f"promise:{promise_type}"
+                                    process.terminate()
+                                    break
+
+                                if detector.add_line(current_line):
+                                    stop_reason[0] = "repetition"
+                                    process.terminate()
+                                    break
+
+                                current_line = ""
+            finally:
+                thread_done.set()
+
+        # Start the output reading thread
+        output_thread = threading.Thread(target=read_output_worker, daemon=True)
+        output_thread.start()
+
+        # Main thread monitors for timeout and completion (responsive to signals)
+        while not thread_done.is_set():
+            # Sleep briefly to allow responsive signal handling
+            time.sleep(0.1)
+
+            # Check for timeout
             if timeout is not None and (time.time() - start_time) > timeout:
                 process.terminate()
+                thread_done.wait(timeout=5)  # Wait for thread to finish
                 try:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
+                current_process = None
                 return IterationResult(stopped_early=True, reason="timeout")
 
-            # Check if process is still running
-            if process.poll() is not None:
-                # Process has ended, read any remaining output
-                remaining = process.stdout.read()
-                if remaining:
-                    sys.stdout.write(remaining)
-                    sys.stdout.flush()
-                    for line in remaining.splitlines(keepends=True):
-                        if line.endswith("\n"):
-                            detector.add_line(line)
-                break
-
-            # Try to read with a small timeout to avoid blocking indefinitely
-            # On Windows, select doesn't work with pipes, so we use readline
-            if platform.system() == "Windows":
-                # Read one character at a time on Windows for real-time streaming
+            # Check if output thread detected a stop condition
+            if stop_reason[0] is not None:
+                thread_done.wait(timeout=5)  # Wait for thread to finish
                 try:
-                    char = process.stdout.read(1)
-                    if not char:
-                        continue
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                current_process = None
+                return IterationResult(stopped_early=True, reason=stop_reason[0])
 
-                    # Print character immediately
-                    sys.stdout.write(char)
-                    sys.stdout.flush()
-
-                    # Build up current line for detection
-                    current_line += char
-
-                    # When we hit a newline, process the line
-                    if char == "\n":
-                        # Check for promise marker
-                        found, promise_type = check_for_promise(current_line)
-                        if found:
-                            process.terminate()
-                            try:
-                                process.wait(timeout=5)
-                            except subprocess.TimeoutExpired:
-                                process.kill()
-                                process.wait()
-                            return IterationResult(
-                                stopped_early=True, reason=f"promise:{promise_type}"
-                            )
-
-                        # Check for repetition
-                        if detector.add_line(current_line):
-                            process.terminate()
-                            try:
-                                process.wait(timeout=5)
-                            except subprocess.TimeoutExpired:
-                                process.kill()
-                                process.wait()
-                            return IterationResult(
-                                stopped_early=True, reason="repetition"
-                            )
-
-                        # Reset current line
-                        current_line = ""
-
-                except Exception:
-                    # If read fails, process might have ended
-                    if process.poll() is not None:
-                        break
-            else:
-                # On Unix-like systems, use select for better performance
-                ready, _, _ = select.select([process.stdout], [], [], 0.1)
-                if ready:
-                    char = process.stdout.read(1)
-                    if not char:
-                        break
-
-                    sys.stdout.write(char)
-                    sys.stdout.flush()
-                    current_line += char
-
-                    if char == "\n":
-                        found, promise_type = check_for_promise(current_line)
-                        if found:
-                            process.terminate()
-                            try:
-                                process.wait(timeout=5)
-                            except subprocess.TimeoutExpired:
-                                process.kill()
-                                process.wait()
-                            return IterationResult(
-                                stopped_early=True, reason=f"promise:{promise_type}"
-                            )
-
-                        if detector.add_line(current_line):
-                            process.terminate()
-                            try:
-                                process.wait(timeout=5)
-                            except subprocess.TimeoutExpired:
-                                process.kill()
-                                process.wait()
-                            return IterationResult(
-                                stopped_early=True, reason="repetition"
-                            )
-
-                        current_line = ""
+        # Thread is done, wait for process to complete
+        output_thread.join(timeout=5)
 
         # Wait for process to complete
         exit_code = process.wait()
 
+        # Clear global process reference
+        current_process = None
         return IterationResult(completed=True, exit_code=exit_code)
 
     except FileNotFoundError:
+        current_process = None
         print(f"\nError: Runner '{runner}' not found in PATH", file=sys.stderr)
         return IterationResult(completed=False, stopped_early=True, reason="error")
     except Exception as e:
+        current_process = None
         print(f"\nError running iteration: {e}", file=sys.stderr)
         return IterationResult(completed=False, stopped_early=True, reason="error")
 
@@ -519,7 +541,10 @@ def get_prd_stats() -> tuple[int, int, int]:
                 if isinstance(feature, dict):
                     # Check various status field names (passes, passing, status, done)
                     status = feature.get(
-                        "passes", feature.get("passing", feature.get("status", feature.get("done", False)))
+                        "passes",
+                        feature.get(
+                            "passing", feature.get("status", feature.get("done", False))
+                        ),
                     )
                     if (
                         status is True
@@ -557,7 +582,10 @@ def get_category_breakdown() -> dict[str, tuple[int, int]]:
                 if isinstance(feature, dict):
                     category = feature.get("category", "uncategorized")
                     status = feature.get(
-                        "passes", feature.get("passing", feature.get("status", feature.get("done", False)))
+                        "passes",
+                        feature.get(
+                            "passing", feature.get("status", feature.get("done", False))
+                        ),
                     )
                     is_passing = (
                         status is True
@@ -570,7 +598,10 @@ def get_category_breakdown() -> dict[str, tuple[int, int]]:
                         categories[category] = (0, 0)
 
                     passing, total = categories[category]
-                    categories[category] = (passing + (1 if is_passing else 0), total + 1)
+                    categories[category] = (
+                        passing + (1 if is_passing else 0),
+                        total + 1,
+                    )
 
         return categories
     except (json.JSONDecodeError, IOError):
@@ -585,6 +616,7 @@ def get_commits_since(timestamp: float) -> int:
     try:
         # Convert timestamp to ISO format for git
         from datetime import datetime as dt
+
         since_str = dt.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
 
         result = subprocess.run(
@@ -676,7 +708,14 @@ def print_status_bar(
     # Row 5: Stop reasons tally (only show if we have completed iterations)
     if completed_iterations > 0:
         stop_parts = []
-        for reason in ["complete", "in_progress", "timeout", "repetition", "error", "normal"]:
+        for reason in [
+            "complete",
+            "in_progress",
+            "timeout",
+            "repetition",
+            "error",
+            "normal",
+        ]:
             count = stop_reasons.get(reason, 0)
             if count > 0:
                 stop_parts.append(f"{count} {reason}")
@@ -684,6 +723,30 @@ def print_status_bar(
             print(f"  🏁 Stops: {', '.join(stop_parts)}")
 
     print(f"{'=' * 80}\n")
+
+
+def handle_sigint(signum, frame):
+    """
+    Handle SIGINT (CTRL+C) signals.
+    First press: Request graceful exit after current iteration.
+    Second press: Force immediate exit.
+    """
+    global exit_requested, current_process, sigint_count
+
+    sigint_count += 1
+
+    if sigint_count == 1:
+        exit_requested = True
+        print("\n[Ralph] Exit requested. Will exit after current iteration completes.")
+        print("[Ralph] Press CTRL+C again to exit immediately.")
+    else:
+        print("\n[Ralph] Force exit requested. Terminating immediately...")
+        if current_process is not None:
+            try:
+                current_process.kill()
+            except Exception:
+                pass
+        sys.exit(130)
 
 
 def print_ascii_art():
@@ -700,6 +763,9 @@ def main():
     args = parse_args()
 
     print_ascii_art()
+
+    # Register signal handler for graceful shutdown
+    signal.signal(signal.SIGINT, handle_sigint)
 
     # Print configuration information
     print(f"{'=' * 60}")
@@ -741,6 +807,11 @@ def main():
 
     # Run iterations
     for iteration in range(1, args.iterations + 1):
+        # Check if user requested exit before starting new iteration
+        if exit_requested:
+            print("\n[Ralph] Exiting gracefully - not starting next iteration")
+            break
+
         # Print status bar at start of each iteration
         print_status_bar(
             iteration=iteration,
