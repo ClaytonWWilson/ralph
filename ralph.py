@@ -98,7 +98,13 @@ RUNNER_TEMPLATES = {
     "crush": ["crush", "run", "-d", "{prompt}"],
     "nanocoder": ["nanocoder", "run", "{prompt}"],
     "opencode": ["opencode", "run", "{prompt}"],
-    "claude-code": ["claude", "-p", "{prompt}"],
+    "claude-code": [
+        "claude",
+        "--permission-mode",
+        "bypassPermissions",
+        "-p",
+        "{prompt}",
+    ],
 }
 
 
