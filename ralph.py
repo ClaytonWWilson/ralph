@@ -725,6 +725,25 @@ def print_status_bar(
     print(f"{'=' * 80}\n")
 
 
+def kill_process_tree(pid: int) -> None:
+    """Kill a process and all its children (entire process tree)."""
+    import platform
+
+    try:
+        if platform.system() == "Windows":
+            # On Windows, use taskkill with /T flag to kill the entire process tree
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                capture_output=True,
+                timeout=5,
+            )
+        else:
+            # On Unix, kill the process group
+            os.killpg(os.getpgid(pid), signal.SIGKILL)  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+
 def handle_sigint(signum, frame):
     """
     Handle SIGINT (CTRL+C) signals.
@@ -743,7 +762,7 @@ def handle_sigint(signum, frame):
         print("\n[Ralph] Force exit requested. Terminating immediately...")
         if current_process is not None:
             try:
-                current_process.kill()
+                kill_process_tree(current_process.pid)
             except Exception:
                 pass
         sys.exit(130)
