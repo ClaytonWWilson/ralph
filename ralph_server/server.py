@@ -93,11 +93,8 @@ def load_pending_tasks() -> list[dict]:
         if not isinstance(t, dict):
             continue
         # Check various status field names
-        status = t.get(
-            "passes", t.get("passing", t.get("status", t.get("done", False)))
-        )
-        is_passing = status is True or status in ("passing", "done", "complete")
-        if not is_passing:
+        status = t.get("passes", False)
+        if not status:
             pending_tasks.append(t)
 
     return pending_tasks
@@ -247,8 +244,6 @@ def complete_task(task_id: str, notes: str | None = None) -> dict:
     # Update task status
     updates = {
         "passes": True,
-        "passing": True,
-        "status": "completed",
         "completed_at": datetime.now(timezone.utc).isoformat(),
     }
     if notes:
@@ -370,12 +365,9 @@ def get_progress() -> dict:
             continue
         total += 1
 
-        status = t.get(
-            "passes", t.get("passing", t.get("status", t.get("done", False)))
-        )
-        is_passing = status is True or status in ("passing", "done", "complete")
+        status = t.get("passes", False)
 
-        if is_passing:
+        if status:
             passing += 1
 
         # Track by category
@@ -383,7 +375,7 @@ def get_progress() -> dict:
         if category not in categories:
             categories[category] = {"total": 0, "passing": 0}
         categories[category]["total"] += 1
-        if is_passing:
+        if status:
             categories[category]["passing"] += 1
 
     return {
@@ -414,27 +406,6 @@ def resource_all_tasks() -> str:
     prd_data = load_prd()
     tasks = prd_data.get("tasks", prd_data.get("features", prd_data.get("items", [])))
     return json.dumps(tasks, indent=2)
-
-
-# @mcp.resource("prd://pending")
-# def resource_pending_tasks() -> str:
-#     """
-#     List of incomplete/pending tasks as JSON.
-
-#     Returns only tasks that are not yet marked as passing.
-#     """
-#     tasks = load_pending_tasks()
-#     return json.dumps(tasks, indent=2)
-
-
-# @mcp.resource("prd://progress")
-# def resource_progress() -> str:
-#     """
-#     Session progress statistics as JSON.
-
-#     Returns the same information as get_progress() but as a resource.
-#     """
-#     return json.dumps(get_progress(), indent=2)
 
 
 @mcp.resource("prd://current")
