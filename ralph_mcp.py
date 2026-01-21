@@ -103,8 +103,8 @@ RUNNER_TEMPLATES = {
         "claude",
         "--permission-mode",
         "bypassPermissions",
-        "--mcp-config",
-        "{mcp_config}",
+        # "--mcp-config",
+        # "{mcp_config}",
         "-p",
         "{prompt}",
     ],
@@ -415,51 +415,51 @@ def validate_paths(prd_path: str) -> None:
 # ============================================================================
 
 
-def create_mcp_config(prd_path: str) -> str:
-    """Create a temporary MCP config file for the runner."""
-    # Get absolute path to the MCP server
-    script_dir = Path(__file__).parent.resolve()
-    server_path = script_dir / "ralph_server" / "server.py"
+# def create_mcp_config(prd_path: str) -> str:
+#     """Create a temporary MCP config file for the runner."""
+#     # Get absolute path to the MCP server
+#     script_dir = Path(__file__).parent.resolve()
+#     server_path = script_dir / "ralph_server" / "server.py"
 
-    # Get absolute PRD path
-    prd_abs = Path(prd_path).resolve()
-    log_file = Path.cwd() / "ralph_server.log"
+#     # Get absolute PRD path
+#     prd_abs = Path(prd_path).resolve()
+#     log_file = Path.cwd() / "ralph_server.log"
 
-    # Use 'uv run' to ensure the correct Python environment with mcp package
-    config = {
-        "mcpServers": {
-            "ralph-tasks": {
-                "type": "stdio",
-                "command": "uv",
-                "args": [
-                    "run",
-                    "--directory",
-                    str(script_dir),
-                    "python",
-                    str(server_path),
-                    "--prd-path",
-                    str(prd_abs),
-                    "--log-file",
-                    str(log_file),
-                ],
-            }
-        }
-    }
+#     # Use 'uv run' to ensure the correct Python environment with mcp package
+#     config = {
+#         "mcpServers": {
+#             "ralph-tasks": {
+#                 "type": "stdio",
+#                 "command": "uv",
+#                 "args": [
+#                     "run",
+#                     "--directory",
+#                     str(script_dir),
+#                     "python",
+#                     str(server_path),
+#                     "--prd-path",
+#                     str(prd_abs),
+#                     "--log-file",
+#                     str(log_file),
+#                 ],
+#             }
+#         }
+#     }
 
-    # Write to a temp config file
-    config_path = Path.cwd() / ".ralph_mcp_config.json"
-    config_path.write_text(json.dumps(config, indent=2))
+#     # Write to a temp config file
+#     config_path = Path.cwd() / ".ralph_mcp_config.json"
+#     config_path.write_text(json.dumps(config, indent=2))
 
-    return str(config_path)
+#     return str(config_path)
 
 
-def write_filtered_prd(incomplete_tasks: List[Dict], working_dir: str = ".") -> None:
-    """Write a filtered PRD file containing only incomplete tasks to the working directory."""
-    prd_path = os.path.join(working_dir, "prd.json")
-    filtered_prd = {"tasks": incomplete_tasks}
+# def write_filtered_prd(incomplete_tasks: List[Dict], working_dir: str = ".") -> None:
+#     """Write a filtered PRD file containing only incomplete tasks to the working directory."""
+#     prd_path = os.path.join(working_dir, "prd.json")
+#     filtered_prd = {"tasks": incomplete_tasks}
 
-    with open(prd_path, "w") as f:
-        json.dump(filtered_prd, f, indent=2)
+#     with open(prd_path, "w") as f:
+#         json.dump(filtered_prd, f, indent=2)
 
 
 def build_system_prompt() -> str:
@@ -499,7 +499,7 @@ WORKFLOW:
 2. Select the highest priority task
 3. Call start_task(task_id) to mark it in-progress
 4. Work on implementing that task
-5. When complete, run git add --all and git commit with an appropriate message
+5. When complete, run git add --all and git commit with an appropriate message including the task id
 6. Call complete_task(task_id) to mark the task as done
 7. If you cannot complete it, call fail_task(task_id, reason)
 
@@ -516,7 +516,7 @@ Begin by calling list_tasks() and selecting a task to work on."""
 def run_iteration(
     runner: str,
     prompt: str,
-    mcp_config: str,
+    # mcp_config: str,
     timeout: Optional[int],
     detector: RepetitionDetector,
     prd_path: str,
@@ -528,8 +528,7 @@ def run_iteration(
     # Build command from template
     cmd_template = RUNNER_TEMPLATES[runner]
     cmd_list = [
-        part.format(prompt=prompt, mcp_config=mcp_config) if "{" in part else part
-        for part in cmd_template
+        part.format(prompt=prompt) if "{" in part else part for part in cmd_template
     ]
 
     # Join command parts into a string for shell execution
@@ -543,6 +542,9 @@ def run_iteration(
 
     cmd = " ".join(cmd_parts)
     cmd = cmd.replace("\n", " \\n ")
+
+    # if verbose:
+    #     print(f"\n[Ralph] Running command: {cmd[:400]}...", file=sys.stderr)
 
     try:
         import platform
@@ -924,7 +926,7 @@ def main():
     signal.signal(signal.SIGINT, handle_sigint)
 
     # Create MCP config for the runner
-    mcp_config = create_mcp_config(args.prd_path)
+    # mcp_config = create_mcp_config(args.prd_path)
 
     # Print configuration
     print(f"{'=' * 60}")
@@ -933,7 +935,7 @@ def main():
     print(f"Working Directory: {os.getcwd()}")
     print(f"PRD Path:          {args.prd_path}")
     print(f"Runner:            {args.runner}")
-    print(f"MCP Config:        {mcp_config}")
+    # print(f"MCP Config:        {mcp_config}")
     print(
         f"Max Iterations:    {args.max_iterations if args.max_iterations else 'unlimited'}"
     )
@@ -1004,11 +1006,11 @@ def main():
             break
 
         # Write filtered PRD to working directory (for reference)
-        try:
-            write_filtered_prd(incomplete)
-        except Exception as e:
-            print(f"\n[Ralph] Error writing filtered PRD: {e}", file=sys.stderr)
-            break
+        # try:
+        #     write_filtered_prd(incomplete)
+        # except Exception as e:
+        #     print(f"\n[Ralph] Error writing filtered PRD: {e}", file=sys.stderr)
+        #     break
 
         # Build prompt
         prompt = build_system_prompt()
@@ -1019,7 +1021,7 @@ def main():
         result = run_iteration(
             runner=args.runner,
             prompt=prompt,
-            mcp_config=mcp_config,
+            # mcp_config=mcp_config,
             timeout=args.timeout,
             detector=detector,
             prd_path=args.prd_path,
@@ -1044,17 +1046,17 @@ def main():
         elif result.reason == "task_complete":
             stop_reasons["task_complete"] += 1
             current_task = result.task_id
-            print(f"\n[Ralph] Task completed successfully, moving to next iteration\n")
+            print("\n[Ralph] Task completed successfully, moving to next iteration\n")
         else:
             stop_reasons["normal"] += 1
 
         detector.reset()
 
     # Cleanup temp config
-    try:
-        Path(mcp_config).unlink(missing_ok=True)
-    except Exception:
-        pass
+    # try:
+    #     Path(mcp_config).unlink(missing_ok=True)
+    # except Exception:
+    #     pass
 
     # Final status
     if all_tasks_complete(args.prd_path):
