@@ -41,6 +41,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Create a task completion log file
+task_log_file = Path("ralph_task_completions.log")
+
 # Create an MCP server
 mcp = FastMCP(
     "Ralph Wiggum",
@@ -201,6 +204,15 @@ def start_task(task_id: str) -> dict:
     state.current_task_id = task_id
     logger.info(f"start_task: marked {task_id} as in_progress")
 
+    # Log the start to a file for ralph_mcp.py to read
+    try:
+        with open(task_log_file, "a") as f:
+            f.write(
+                f"<time>{datetime.now().isoformat()}</time><start>{task_id}</start>\n"
+            )
+    except Exception as e:
+        logger.error(f"Failed to write to task log: {e}")
+
     # Return updated task
     updated_task = get_task_by_id(task_id)
     assert updated_task is not None  # We just verified it exists
@@ -253,6 +265,15 @@ def complete_task(task_id: str, notes: str | None = None) -> dict:
         f"complete_task: marked {task_id} as completed (total completed this session: {state.tasks_completed})"
     )
 
+    # Log the complete to a file for ralph_mcp.py to read
+    try:
+        with open(task_log_file, "a") as f:
+            f.write(
+                f"<time>{datetime.now().isoformat()}</time><complete>{task_id}</complete>\n"
+            )
+    except Exception as e:
+        logger.error(f"Failed to write to task log: {e}")
+
     # Return updated task
     updated_task = get_task_by_id(task_id)
     assert updated_task is not None  # We just verified it exists
@@ -301,6 +322,15 @@ def fail_task(task_id: str, reason: str) -> dict:
     logger.info(
         f"fail_task: marked {task_id} as failed (total failed this session: {state.tasks_failed})"
     )
+
+    # Log the fail to a file for ralph_mcp.py to read
+    try:
+        with open(task_log_file, "a") as f:
+            f.write(
+                f"<time>{datetime.now().isoformat()}</time><fail>{task_id}</fail>\n"
+            )
+    except Exception as e:
+        logger.error(f"Failed to write to task log: {e}")
 
     # Return updated task
     updated_task = get_task_by_id(task_id)

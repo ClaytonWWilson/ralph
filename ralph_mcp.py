@@ -410,58 +410,6 @@ def validate_paths(prd_path: str) -> None:
         raise ValueError(f"Invalid PRD structure: {e}")
 
 
-# ============================================================================
-# MCP Configuration
-# ============================================================================
-
-
-# def create_mcp_config(prd_path: str) -> str:
-#     """Create a temporary MCP config file for the runner."""
-#     # Get absolute path to the MCP server
-#     script_dir = Path(__file__).parent.resolve()
-#     server_path = script_dir / "ralph_server" / "server.py"
-
-#     # Get absolute PRD path
-#     prd_abs = Path(prd_path).resolve()
-#     log_file = Path.cwd() / "ralph_server.log"
-
-#     # Use 'uv run' to ensure the correct Python environment with mcp package
-#     config = {
-#         "mcpServers": {
-#             "ralph-tasks": {
-#                 "type": "stdio",
-#                 "command": "uv",
-#                 "args": [
-#                     "run",
-#                     "--directory",
-#                     str(script_dir),
-#                     "python",
-#                     str(server_path),
-#                     "--prd-path",
-#                     str(prd_abs),
-#                     "--log-file",
-#                     str(log_file),
-#                 ],
-#             }
-#         }
-#     }
-
-#     # Write to a temp config file
-#     config_path = Path.cwd() / ".ralph_mcp_config.json"
-#     config_path.write_text(json.dumps(config, indent=2))
-
-#     return str(config_path)
-
-
-# def write_filtered_prd(incomplete_tasks: List[Dict], working_dir: str = ".") -> None:
-#     """Write a filtered PRD file containing only incomplete tasks to the working directory."""
-#     prd_path = os.path.join(working_dir, "prd.json")
-#     filtered_prd = {"tasks": incomplete_tasks}
-
-#     with open(prd_path, "w") as f:
-#         json.dump(filtered_prd, f, indent=2)
-
-
 def build_system_prompt() -> str:
     """Build the system prompt with MCP tool instructions."""
     prompt = """You are working on implementing tasks from a Product Requirements Document (PRD).
@@ -513,6 +461,80 @@ Begin by calling list_tasks() and selecting a task to work on."""
 # ============================================================================
 
 
+def parse_task_log(
+    log_path: str, after_timestamp: Optional[str] = None
+) -> Tuple[List[Dict], Optional[str]]:
+    """Parse the task completion log file for new events after a given timestamp.
+
+    Returns a tuple of (events, latest_timestamp) where events is a list of dicts
+    with keys: 'type' (start/complete/fail), 'task_id', 'timestamp'.
+    """
+    events = []
+    latest_timestamp = after_timestamp
+
+    if not os.path.exists(log_path):
+        return (events, latest_timestamp)
+
+    try:
+        with open(log_path, "r") as f:
+            # Parse XML-like tags: <start>task-id</start>, <complete>task-id</complete>, <fail>task-id</fail>
+            for line in f:
+                # Extract timestamp
+                timestamp_match = re.search(r"<time>(.*?)</time>", line)
+                timestamp = timestamp_match.group(1) if timestamp_match else None
+
+                # Skip entries at or before the last seen timestamp
+                if after_timestamp and timestamp and timestamp <= after_timestamp:
+                    continue
+
+                # Track the latest timestamp
+                if timestamp and (
+                    latest_timestamp is None or timestamp > latest_timestamp
+                ):
+                    latest_timestamp = timestamp
+
+                # Check for start event
+                start_match = re.search(r"<start>(.*?)</start>", line)
+                if start_match:
+                    events.append(
+                        {
+                            "type": "start",
+                            "task_id": start_match.group(1),
+                            "timestamp": timestamp,
+                        }
+                    )
+                    continue
+
+                # Check for complete event
+                complete_match = re.search(r"<complete>(.*?)</complete>", line)
+                if complete_match:
+                    events.append(
+                        {
+                            "type": "complete",
+                            "task_id": complete_match.group(1),
+                            "timestamp": timestamp,
+                        }
+                    )
+                    continue
+
+                # Check for fail event
+                fail_match = re.search(r"<fail>(.*?)</fail>", line)
+                if fail_match:
+                    events.append(
+                        {
+                            "type": "fail",
+                            "task_id": fail_match.group(1),
+                            "timestamp": timestamp,
+                        }
+                    )
+                    continue
+
+        return (events, latest_timestamp)
+    except Exception as e:
+        print(f"[Ralph] Warning: Error parsing task log: {e}", file=sys.stderr)
+        return (events, latest_timestamp)
+
+
 def run_iteration(
     runner: str,
     prompt: str,
@@ -520,8 +542,10 @@ def run_iteration(
     timeout: Optional[int],
     detector: RepetitionDetector,
     prd_path: str,
+    log_path: str,
+    last_timestamp: str,
     verbose: bool = False,
-) -> IterationResult:
+) -> Tuple[IterationResult, Optional[str]]:
     """Run a single iteration of the AI agent."""
     global current_process
 
@@ -567,8 +591,8 @@ def run_iteration(
 
         start_time = time.time()
 
-        # Track PRD state to detect task completion
-        initial_stats = get_prd_stats(prd_path)
+        # Track timestamp to detect new events
+        current_timestamp = last_timestamp
 
         # Shared state for the output reading thread
         stop_reason: List[Optional[str]] = [None]
@@ -633,8 +657,8 @@ def run_iteration(
         output_thread = threading.Thread(target=read_output_worker, daemon=True)
         output_thread.start()
 
-        # Main thread monitors for timeout and PRD changes
-        check_interval = 2.0  # Check PRD every 2 seconds
+        # Main thread monitors for timeout and task log changes
+        check_interval = 2.0  # Check log every 2 seconds
         last_check = time.time()
 
         while not thread_done.is_set():
@@ -650,7 +674,10 @@ def run_iteration(
                     process.kill()
                     process.wait()
                 current_process = None
-                return IterationResult(stopped_early=True, reason="timeout")
+                return (
+                    IterationResult(stopped_early=True, reason="timeout"),
+                    current_timestamp,
+                )
 
             # Check if output thread detected a stop condition
             if stop_reason[0] is not None:
@@ -661,51 +688,96 @@ def run_iteration(
                     process.kill()
                     process.wait()
                 current_process = None
-                return IterationResult(
-                    stopped_early=True,
-                    reason=stop_reason[0],
-                    task_id=task_id_detected[0],
+                return (
+                    IterationResult(
+                        stopped_early=True,
+                        reason=stop_reason[0],
+                        task_id=task_id_detected[0],
+                    ),
+                    current_timestamp,
                 )
 
-            # Periodically check PRD for task completion (MCP tool called)
+            # Periodically check task log for completion/failure events
             if time.time() - last_check >= check_interval:
                 last_check = time.time()
-                current_stats = get_prd_stats(prd_path)
+                events, new_timestamp = parse_task_log(log_path, current_timestamp)
 
-                # If passing count increased, a task was completed
-                if current_stats[0] > initial_stats[0]:
-                    if verbose:
+                if new_timestamp:
+                    current_timestamp = new_timestamp
+
+                for event in events:
+                    if event["type"] == "complete":
+                        if verbose:
+                            print(
+                                f"\n[Ralph] Task completed via MCP: {event['task_id']}",
+                                file=sys.stderr,
+                            )
+                        # End the current iteration immediately
+                        process.terminate()
+                        thread_done.wait(timeout=5)
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait()
+                        current_process = None
+                        return (
+                            IterationResult(
+                                completed=True,
+                                reason="task_complete",
+                                task_id=event["task_id"],
+                            ),
+                            current_timestamp,
+                        )
+                    elif event["type"] == "fail":
+                        if verbose:
+                            print(
+                                f"\n[Ralph] Task failed via MCP: {event['task_id']}",
+                                file=sys.stderr,
+                            )
+                        # End the current iteration immediately
+                        process.terminate()
+                        thread_done.wait(timeout=5)
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait()
+                        current_process = None
+                        return (
+                            IterationResult(
+                                completed=True,
+                                reason="task_failed",
+                                task_id=event["task_id"],
+                            ),
+                            current_timestamp,
+                        )
+                    elif event["type"] == "start" and verbose:
                         print(
-                            f"\n[Ralph] Task completed via MCP (passing: {initial_stats[0]} -> {current_stats[0]})",
+                            f"\n[Ralph] Task started via MCP: {event['task_id']}",
                             file=sys.stderr,
                         )
-                    # End the current iteration immediately
-                    process.terminate()
-                    break
 
         output_thread.join(timeout=5)
         exit_code = process.wait()
         current_process = None
 
-        # Check final PRD state
-        final_stats = get_prd_stats(prd_path)
-        if final_stats[0] > initial_stats[0]:
-            return IterationResult(
-                completed=True,
-                reason="task_complete",
-                exit_code=exit_code,
-            )
-
-        return IterationResult(completed=True, exit_code=exit_code)
+        return (IterationResult(completed=True, exit_code=exit_code), current_timestamp)
 
     except FileNotFoundError:
         current_process = None
         print(f"\nError: Runner '{runner}' not found in PATH", file=sys.stderr)
-        return IterationResult(completed=False, stopped_early=True, reason="error")
+        return (
+            IterationResult(completed=False, stopped_early=True, reason="error"),
+            last_timestamp,
+        )
     except Exception as e:
         current_process = None
         print(f"\nError running iteration: {e}", file=sys.stderr)
-        return IterationResult(completed=False, stopped_early=True, reason="error")
+        return (
+            IterationResult(completed=False, stopped_early=True, reason="error"),
+            last_timestamp,
+        )
 
 
 # ============================================================================
@@ -950,6 +1022,13 @@ def main():
         history_size=args.history_size, threshold=args.repetition_threshold
     )
 
+    # Determine task completion log path
+    task_log_path = str(Path(__file__).parent.resolve() / "ralph_task_completions.log")
+
+    # Clear old data from the log
+    os.unlink(task_log_path)
+    Path(task_log_path).write_text("")
+
     session_start_time = time.time()
     prev_iteration_time: Optional[float] = None
     completed_iterations = 0
@@ -962,6 +1041,7 @@ def main():
         "normal": 0,
     }
     current_task: Optional[str] = None
+    last_log_timestamp = datetime.now().isoformat()
 
     # Main loop
     iteration = 0
@@ -1018,13 +1098,15 @@ def main():
         # Run iteration
         iteration_start_time = time.time()
 
-        result = run_iteration(
+        result, last_log_timestamp = run_iteration(
             runner=args.runner,
             prompt=prompt,
             # mcp_config=mcp_config,
             timeout=args.timeout,
             detector=detector,
             prd_path=args.prd_path,
+            log_path=task_log_path,
+            last_timestamp=last_log_timestamp,
             verbose=args.verbose,
         )
 
@@ -1047,6 +1129,10 @@ def main():
             stop_reasons["task_complete"] += 1
             current_task = result.task_id
             print("\n[Ralph] Task completed successfully, moving to next iteration\n")
+        elif result.reason == "task_failed":
+            stop_reasons["task_failed"] += 1
+            current_task = result.task_id
+            print("\n[Ralph] Task failed, moving to next iteration\n")
         else:
             stop_reasons["normal"] += 1
 
