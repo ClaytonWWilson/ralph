@@ -170,7 +170,7 @@ class RepetitionDetector:
 
     def _extract_sentences(self, line: str) -> list[str]:
         """Extract and normalize sentences from a line."""
-        sentences = []
+        sentences: list[str] = []
         line = line.strip()
 
         if len(line) < 10:
@@ -465,7 +465,7 @@ def parse_task_log(
     Returns a tuple of (events, latest_timestamp) where events is a list of dicts
     with keys: 'type' (start/complete/fail), 'task_id', 'timestamp'.
     """
-    events = []
+    events: List[Dict] = []
     latest_timestamp = after_timestamp
 
     if not os.path.exists(log_path):
@@ -539,7 +539,7 @@ def run_iteration(
     detector: RepetitionDetector,
     prd_path: str,
     log_path: str,
-    last_timestamp: str,
+    last_timestamp: Optional[str],
     verbose: bool = False,
 ) -> Tuple[IterationResult, Optional[str]]:
     """Run a single iteration of the AI agent."""
@@ -568,8 +568,9 @@ def run_iteration(
 
     try:
         import platform
+        from typing import Any
 
-        popen_kwargs = {
+        popen_kwargs: Dict[str, Any] = {
             "stdout": subprocess.PIPE,
             "stderr": subprocess.STDOUT,
             "text": True,
@@ -602,6 +603,9 @@ def run_iteration(
             try:
                 while True:
                     if process.poll() is not None:
+                        assert (
+                            process.stdout is not None
+                        )  # stdout is PIPE, so it's always set
                         remaining = process.stdout.read()
                         if remaining:
                             sys.stdout.write(remaining)
@@ -610,6 +614,9 @@ def run_iteration(
 
                     if platform.system() == "Windows":
                         try:
+                            assert (
+                                process.stdout is not None
+                            )  # stdout is PIPE, so it's always set
                             char = process.stdout.read(1)
                             if not char:
                                 continue
@@ -633,6 +640,9 @@ def run_iteration(
 
                         ready, _, _ = select.select([process.stdout], [], [], 0.1)
                         if ready:
+                            assert (
+                                process.stdout is not None
+                            )  # stdout is PIPE, so it's always set
                             char = process.stdout.read(1)
                             if not char:
                                 break
@@ -864,7 +874,7 @@ def print_status_bar(
             cat_parts.append(f"{cat}: {cat_pass}/{cat_total}{marker}")
         print(f"  📁 Categories: {' | '.join(cat_parts)}")
 
-    completion_rate = 0
+    completion_rate = 0.0
     if completed_iterations > 0:
         completion_rate = (
             stop_reasons.get("task_complete", 0) / completed_iterations
@@ -905,7 +915,7 @@ def kill_process_tree(pid: int) -> None:
                 timeout=5,
             )
         else:
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
+            os.killpg(os.getpgid(pid), signal.SIGKILL)  # type: ignore[attr-defined]
     except Exception:
         pass
 
