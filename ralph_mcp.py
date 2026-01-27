@@ -447,9 +447,8 @@ WORKFLOW:
 2. Select the highest priority task
 3. Call start_task(task_id) to mark it in-progress
 4. Work on implementing that task
-5. When complete, run git add --all and git commit with an appropriate message including the task id
-6. Call complete_task(task_id) to mark the task as done
-7. If you cannot complete it, call fail_task(task_id, reason)
+5. Call complete_task(task_id) to mark the task as done
+6. If you cannot complete it, call fail_task(task_id, reason)
 
 Begin by calling list_tasks() and selecting a task to work on."""
 
