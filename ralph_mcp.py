@@ -97,28 +97,25 @@ ASCII_HEADER = """--------------------------------------------------------------
 #####################################################################################################
 """
 
-# Runner command templates - configured for MCP server
 RUNNER_TEMPLATES = {
     "claude-code": [
         "claude",
         "--permission-mode",
         "bypassPermissions",
-        # "--mcp-config",
-        # "{mcp_config}",
         "-p",
         "{prompt}",
     ],
-    "opencode": [  # MCP must be added
+    "opencode": [
         "opencode",
         "run",
         "{prompt}",
     ],
-    "crush": [  # MCP must be added
+    "crush": [
         "crush",
         "run",
         "{prompt}",
     ],
-    "nanocoder": [  # MCP must be added
+    "nanocoder": [
         "nanocoder",
         "run",
         "{prompt}",
